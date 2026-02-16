@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -17,33 +18,20 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class Piece {
-  final List<Point<int>> cells; // (x,y)
-  final int colorId;
-  Piece(this.cells, this.colorId);
-  int get w => cells.map((p) => p.x).reduce(max) + 1;
-  int get h => cells.map((p) => p.y).reduce(max) + 1;
+class Cell {
+  final int r;
+  final int c;
+  const Cell(this.r, this.c);
 }
 
-final List<Color> kColors = [
-  Colors.red,
-  Colors.pink,
-  Colors.purple,
-  Colors.orange,
-  Colors.cyan,
-];
+class Piece {
+  final List<Cell> cells;
+  final Color color;
+  const Piece({required this.cells, required this.color});
 
-final List<List<Point<int>>> kShapes = [
-  [Point(0, 0)],
-  [Point(0, 0), Point(1, 0)],
-  [Point(0, 0), Point(0, 1)],
-  [Point(0, 0), Point(1, 0), Point(2, 0)],
-  [Point(0, 0), Point(0, 1), Point(0, 2)],
-  [Point(0, 0), Point(1, 0), Point(0, 1)],
-  [Point(0, 0), Point(1, 0), Point(1, 1)],
-  [Point(0, 0), Point(1, 0), Point(0, 1), Point(1, 1)],
-  [Point(0, 0), Point(0, 1), Point(0, 2), Point(1, 2)],
-];
+  int get w => cells.map((e) => e.c).reduce(max) + 1;
+  int get h => cells.map((e) => e.r).reduce(max) + 1;
+}
 
 class GamePage extends StatefulWidget {
   const GamePage({super.key});
@@ -54,477 +42,519 @@ class GamePage extends StatefulWidget {
 class _GamePageState extends State<GamePage> {
   static const int n = 8;
 
-  // ✅ 너가 확정한 값
+  final List<List<int>> board = List.generate(n, (_) => List.filled(n, 0));
+
+  late List<Piece> pieces;
+  ui.Image? tileImg;
+
+  Rect? _gridRect;
+  double _gridTile = 0;
+  double _gridStep = 0;
+
+  // 트레이 슬롯(화면 local 좌표 기준)
+  final List<Rect> _traySlotRects = [Rect.zero, Rect.zero, Rect.zero];
+
+  // 드래그 상태
+  int? draggingIndex;
+  Piece? draggingPiece;
+  Offset? dragGlobalPos;
+
+  // ✅ 손가락 가림 방지(더 위로)
+  static const double fingerLift = 110;
+
+  // ✅ 너가 확정한 보드 맞춤값
   static const double LEFT = 14;
   static const double TOP = 14;
   static const double RIGHT = 14;
   static const double BOTTOM = 14;
   static const double GAP = 2;
 
-  final List<List<int>> board = List.generate(n, (_) => List.filled(n, 0));
+  // (옵션) 빈 칸 보이게
+  static const bool SHOW_EMPTY_CELLS = true;
 
-  final GlobalKey _rootKey = GlobalKey(); // ✅ 화면 로컬 변환
-  final GlobalKey _boardKey = GlobalKey();
-  final GlobalKey _trayKey = GlobalKey();
-
-  ui.Image? tileImg;
   final _rng = Random();
-  late List<Piece> pieces;
-
-  int? draggingIndex;
-  Offset? dragPosGlobal;
-
-  // ✅ “손가락이 피스를 잡은 위치” 오프셋
-  Offset? grabOffsetInPiece; // piece local 좌표 (px)
 
   @override
   void initState() {
     super.initState();
-    pieces = _roll3();
+    pieces = List.generate(3, (_) => _randomPiece());
     _loadTile();
-  }
-
-  List<Piece> _roll3() => List.generate(3, (_) => _randomPiece());
-  Piece _randomPiece() {
-    final shape = kShapes[_rng.nextInt(kShapes.length)];
-    final colorId = 1 + _rng.nextInt(kColors.length);
-    return Piece(shape, colorId);
   }
 
   Future<void> _loadTile() async {
     final data = await rootBundle.load('assets/images/tile.png');
     final bytes = data.buffer.asUint8List();
-    final img = await decodeImageFromList(bytes);
-    setState(() => tileImg = img);
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    setState(() => tileImg = frame.image);
   }
 
-  Rect _gridRect(Size boardSize) => Rect.fromLTRB(
-    LEFT,
-    TOP,
-    boardSize.width - RIGHT,
-    boardSize.height - BOTTOM,
-  );
+  Piece _randomPiece() {
+    final shapes = <List<Cell>>[
+      [const Cell(0, 0)],
+      [const Cell(0, 0), const Cell(0, 1)],
+      [const Cell(0, 0), const Cell(1, 0)],
+      [const Cell(0, 0), const Cell(0, 1), const Cell(0, 2)],
+      [const Cell(0, 0), const Cell(1, 0), const Cell(2, 0)],
+      [const Cell(0, 0), const Cell(0, 1), const Cell(1, 0), const Cell(1, 1)],
+      [const Cell(0, 0), const Cell(1, 0), const Cell(2, 0), const Cell(2, 1)],
+      [const Cell(0, 1), const Cell(1, 1), const Cell(2, 1), const Cell(2, 0)],
+      [const Cell(0, 0), const Cell(0, 1), const Cell(1, 1), const Cell(2, 1)],
+      [const Cell(0, 0), const Cell(0, 1), const Cell(1, 0)],
+    ];
 
-  // ===== 트레이에서 어떤 피스 눌렀는지 + grabOffset 계산 =====
-  int? _hitTestTrayAndGrab(Offset globalPos) {
-    final trayBox = _trayKey.currentContext?.findRenderObject() as RenderBox?;
-    if (trayBox == null) return null;
+    final colors = <Color>[
+      const Color(0xFFFF3B30),
+      const Color(0xFFAF52DE),
+      const Color(0xFF0A84FF),
+      const Color(0xFFFF2D55),
+      const Color(0xFF30D158),
+      const Color(0xFFFF9F0A),
+    ];
 
-    final local = trayBox.globalToLocal(globalPos);
-    final size = trayBox.size;
-
-    final slotW = size.width / 3.0;
-    final idx = (local.dx / slotW).floor();
-    if (idx < 0 || idx > 2) return null;
-
-    final slot = Rect.fromLTWH(idx * slotW, 0, slotW, size.height);
-    final piece = pieces[idx];
-
-    final maxDim = max(piece.w, piece.h);
-    final pTile = min(slot.width, slot.height) / (maxDim + 1.4);
-    const g = 2.0;
-
-    final pw = piece.w * pTile + (piece.w - 1) * g;
-    final ph = piece.h * pTile + (piece.h - 1) * g;
-    final origin = Offset(slot.center.dx - pw / 2, slot.center.dy - ph / 2);
-    final rect = Rect.fromLTWH(origin.dx, origin.dy, pw, ph);
-
-    if (!rect.contains(local)) return null;
-
-    // ✅ 손가락이 피스 내부 어디를 잡았는지 저장
-    grabOffsetInPiece = local - origin; // piece local(px)
-    return idx;
+    return Piece(
+      cells: shapes[_rng.nextInt(shapes.length)],
+      color: colors[_rng.nextInt(colors.length)],
+    );
   }
 
+  // =========================
+  // 드래그 시작/이동/종료
+  // =========================
   void _onPanStart(DragStartDetails d) {
-    final idx = _hitTestTrayAndGrab(d.globalPosition);
-    if (idx == null) return;
+    // ✅ 트레이 슬롯에서 시작했는지
+    final local = d.localPosition;
+    for (int i = 0; i < 3; i++) {
+      if (_traySlotRects[i].contains(local)) {
+        setState(() {
+          draggingIndex = i;
+          draggingPiece = pieces[i];
 
-    setState(() {
-      draggingIndex = idx;
-      dragPosGlobal = d.globalPosition;
-    });
+          // ✅ 시작 순간부터 손가락 위로 뜨게 보이도록 globalPos 저장
+          dragGlobalPos = d.globalPosition;
+          // ✅ 트레이 슬롯은 즉시 비우기(숨김)
+          // -> painter에서 hideIndex로 처리됨
+        });
+        return;
+      }
+    }
   }
 
   void _onPanUpdate(DragUpdateDetails d) {
-    if (draggingIndex == null) return;
-    setState(() => dragPosGlobal = d.globalPosition);
+    if (draggingPiece == null) return;
+    setState(() => dragGlobalPos = d.globalPosition);
   }
 
   void _onPanEnd(DragEndDetails d) {
-    if (draggingIndex == null) return;
+    if (draggingPiece == null || draggingIndex == null) return;
 
-    final idx = draggingIndex!;
-    final piece = pieces[idx];
-
-    bool placed = false;
-
-    final boardBox = _boardKey.currentContext?.findRenderObject() as RenderBox?;
-    if (boardBox != null && dragPosGlobal != null) {
-      final boardLocal = boardBox.globalToLocal(dragPosGlobal!);
-      final boardSize = boardBox.size;
-      final grid = _gridRect(boardSize);
-
-      final tile = (grid.width - GAP * (n - 1)) / n;
-      final pw = piece.w * tile + (piece.w - 1) * GAP;
-      final ph = piece.h * tile + (piece.h - 1) * GAP;
-
-      // ✅ “중심”이 아니라 grabOffset 기준으로 origin 계산
-      final grab = grabOffsetInPiece ?? Offset(pw / 2, ph / 2);
-      final origin = boardLocal - grab;
-
-      final snap = _snapOriginToCell(origin, piece, grid);
-      if (snap != null) {
-        final (baseRow, baseCol) = snap;
-        if (_canPlace(piece, baseRow, baseCol)) {
-          _place(piece, baseRow, baseCol);
-          placed = true;
-        }
-      }
-    }
+    final placed = _tryPlaceOnBoard(draggingPiece!, dragGlobalPos);
 
     setState(() {
+      if (placed) {
+        // ✅ 성공한 경우에만 새 블록 생성
+        pieces[draggingIndex!] = _randomPiece();
+      }
+      // 실패면 원래 블록이 그대로 다시 보임(숨김 해제)
       draggingIndex = null;
-      dragPosGlobal = null;
-      grabOffsetInPiece = null;
-
-      if (placed) pieces[idx] = _randomPiece();
+      draggingPiece = null;
+      dragGlobalPos = null;
     });
   }
 
-  // ✅ origin(피스 좌상단)을 그리드에 스냅
-  (int, int)? _snapOriginToCell(Offset origin, Piece piece, Rect grid) {
-    final tile = (grid.width - GAP * (n - 1)) / n;
-    final step = tile + GAP;
+  bool _tryPlaceOnBoard(Piece piece, Offset? globalPos) {
+    final rect = _gridRect;
+    if (rect == null || globalPos == null) return false;
 
-    final dx = origin.dx - grid.left;
-    final dy = origin.dy - grid.top;
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null) return false;
 
-    // ✅ round/floor 취향인데, 정확히 붙이려면 round가 보통 더 좋음
-    final col = (dx / step).round();
-    final row = (dy / step).round();
+    // ✅ global -> local
+    final p = box.globalToLocal(globalPos);
 
-    if (row < 0 || col < 0) return null;
-    if (row + piece.h > n || col + piece.w > n) return null;
+    if (!rect.contains(p)) return false;
 
-    return (row, col);
-  }
+    final dx = p.dx - rect.left;
+    final dy = p.dy - rect.top;
 
-  bool _canPlace(Piece piece, int baseRow, int baseCol) {
+    final tile = _gridTile;
+    final step = _gridStep;
+    if (tile <= 0 || step <= 0) return false;
+
+    final col = (dx / step).floor();
+    final row = (dy / step).floor();
+
+    if (row < 0 || row >= n || col < 0 || col >= n) return false;
+
+    // ✅ 틈 클릭/드롭 방지: 칸 내부일 때만
+    final inTileX = (dx - col * step) <= tile;
+    final inTileY = (dy - row * step) <= tile;
+    if (!inTileX || !inTileY) return false;
+
+    // 범위/충돌 체크
     for (final cell in piece.cells) {
-      final r = baseRow + cell.y;
-      final c = baseCol + cell.x;
-      if (board[r][c] != 0) return false;
+      final rr = row + cell.r;
+      final cc = col + cell.c;
+      if (rr < 0 || rr >= n || cc < 0 || cc >= n) return false;
+      if (board[rr][cc] != 0) return false;
     }
+
+    // 배치(색 유지)
+    final colorId = _colorToId(piece.color);
+    for (final cell in piece.cells) {
+      board[row + cell.r][col + cell.c] = colorId;
+    }
+
     return true;
   }
 
-  void _place(Piece piece, int baseRow, int baseCol) {
-    for (final cell in piece.cells) {
-      board[baseRow + cell.y][baseCol + cell.x] = piece.colorId;
-    }
+  int _colorToId(Color c) {
+    // 간단히 색 value 기반으로 1..N 반복 매핑
+    final colors = <Color>[
+      const Color(0xFFFF3B30),
+      const Color(0xFFAF52DE),
+      const Color(0xFF0A84FF),
+      const Color(0xFFFF2D55),
+      const Color(0xFF30D158),
+      const Color(0xFFFF9F0A),
+    ];
+    final idx = colors.indexWhere((e) => e.value == c.value);
+    return (idx == -1) ? 1 : (idx + 1);
   }
 
+  // =========================
+  // UI
+  // =========================
   @override
   Widget build(BuildContext context) {
-    final bottomSafe = MediaQuery.of(context).viewPadding.bottom;
-
     return Scaffold(
-      body: GestureDetector(
-        key: _rootKey,
-        behavior: HitTestBehavior.opaque,
-        onPanStart: _onPanStart,
-        onPanUpdate: _onPanUpdate,
-        onPanEnd: _onPanEnd,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Image.asset('assets/images/background.png', fit: BoxFit.cover),
+      body: LayoutBuilder(builder: (context, cons) {
+        final w = cons.maxWidth;
+        final h = cons.maxHeight;
 
-            SafeArea(
-              top: true,
-              bottom: false,
-              child: LayoutBuilder(
-                builder: (context, cons) {
-                  final boardSide =
-                  min(cons.maxWidth * 0.98, cons.maxHeight * 0.66);
+        // 보드 정사각형 크기
+        final boardSide = min(w * 0.96, h * 0.60);
 
-                  // ✅ 너가 원하는 위치
-                  final boardTop = cons.maxHeight * 0.20;
+        // ✅ 너가 좋아한 위치
+        final boardTop = h * 0.20;
 
-                  final trayH = max(140.0, cons.maxHeight * 0.22);
-                  final trayBottom = bottomSafe + 6;
+        // 트레이 높이(하단바 바로 위)
+        final trayHeight = min(160.0, h * 0.19);
 
-                  return Stack(
-                    children: [
-                      Positioned(
-                        top: boardTop,
-                        left: (cons.maxWidth - boardSide) / 2,
-                        width: boardSide,
-                        height: boardSide,
-                        child: Container(
-                          key: _boardKey,
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              Image.asset('assets/images/board.png',
-                                  fit: BoxFit.fill),
-                              CustomPaint(
-                                painter: BoardPainter(
-                                  board: board,
-                                  tileImg: tileImg,
-                                  left: LEFT,
-                                  top: TOP,
-                                  right: RIGHT,
-                                  bottom: BOTTOM,
-                                  gap: GAP,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onPanStart: _onPanStart,
+          onPanUpdate: _onPanUpdate,
+          onPanEnd: _onPanEnd,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.asset('assets/images/background.png', fit: BoxFit.cover),
+
+              // ===== 보드 =====
+              Positioned(
+                top: boardTop,
+                left: (w - boardSide) / 2,
+                width: boardSide,
+                height: boardSide,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Image.asset('assets/images/board.png', fit: BoxFit.fill),
+                    CustomPaint(
+                      painter: BoardPainter(
+                        board: board,
+                        tileImg: tileImg,
+                        showEmptyCells: SHOW_EMPTY_CELLS,
+                        onGridComputed: (gridRect, tile, step) {
+                          // gridRect는 보드 위젯 내부 좌표
+                          final boardOffset = Offset((w - boardSide) / 2, boardTop);
+                          _gridRect = gridRect.shift(boardOffset);
+                          _gridTile = tile;
+                          _gridStep = step;
+                        },
                       ),
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: trayBottom,
-                        height: trayH,
-                        child: Container(
-                          key: _trayKey,
-                          child: CustomPaint(
-                            painter: TrayPainter(pieces: pieces, tileImg: tileImg),
-                          ),
-                        ),
-                      ),
-                    ],
-                  );
-                },
+                    ),
+                  ],
+                ),
               ),
-            ),
 
-            // ✅ 드래그 프리뷰: 이제 “화면 로컬 좌표”로 그려서 안 사라짐
-            if (draggingIndex != null && dragPosGlobal != null)
-              Positioned.fill(
-                child: CustomPaint(
-                  painter: DragOverlayPainter(
-                    rootKey: _rootKey,
-                    globalPos: dragPosGlobal!,
-                    piece: pieces[draggingIndex!],
-                    tileImg: tileImg,
-                    boardKey: _boardKey,
-                    grabOffsetInPiece: grabOffsetInPiece,
-                    left: LEFT,
-                    top: TOP,
-                    right: RIGHT,
-                    bottom: BOTTOM,
-                    gap: GAP,
-                    n: n,
+              // ===== 트레이 =====
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: SizedBox(
+                      height: trayHeight,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          CustomPaint(
+                            painter: TrayPainter(
+                              pieces: pieces,
+                              tileImg: tileImg,
+                              hideIndex: draggingIndex, // ✅ 누르면 자리 비움
+                            ),
+                          ),
+                          LayoutBuilder(
+                            builder: (context, trayCons) {
+                              // ✅ 트레이 슬롯 rect를 화면 local 좌표 기준으로 계산
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                final box = context.findRenderObject() as RenderBox?;
+                                final parent = this.context.findRenderObject() as RenderBox?;
+                                if (box == null || parent == null) return;
+
+                                final topLeftGlobal = box.localToGlobal(Offset.zero);
+                                final topLeftLocal = parent.globalToLocal(topLeftGlobal);
+
+                                final trayW = trayCons.maxWidth;
+                                final slotW = trayW / 3;
+                                final slotH = trayCons.maxHeight;
+
+                                for (int i = 0; i < 3; i++) {
+                                  _traySlotRects[i] = Rect.fromLTWH(
+                                    topLeftLocal.dx + i * slotW,
+                                    topLeftLocal.dy,
+                                    slotW,
+                                    slotH,
+                                  );
+                                }
+                              });
+                              return const SizedBox.expand();
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ),
-          ],
-        ),
-      ),
+
+              // ===== 드래그 프리뷰(오버레이) =====
+              if (draggingPiece != null && dragGlobalPos != null)
+                CustomPaint(
+                  painter: DragOverlayPainter(
+                    piece: draggingPiece!,
+                    globalPos: dragGlobalPos!,
+                    tileImg: tileImg,
+                    lift: fingerLift, // ✅ 더 위로 뜸
+                    targetTile: _gridTile > 0 ? _gridTile : 42,
+                    gap: GAP,
+                  ),
+                  child: const SizedBox.expand(),
+                ),
+            ],
+          ),
+        );
+      }),
     );
   }
 }
 
+// =========================
+// 보드 painter
+// =========================
 class BoardPainter extends CustomPainter {
   final List<List<int>> board;
   final ui.Image? tileImg;
-  final double left, top, right, bottom, gap;
+  final bool showEmptyCells;
+  final void Function(Rect gridRect, double tile, double step) onGridComputed;
 
   BoardPainter({
     required this.board,
     required this.tileImg,
-    required this.left,
-    required this.top,
-    required this.right,
-    required this.bottom,
-    required this.gap,
+    required this.showEmptyCells,
+    required this.onGridComputed,
   });
-
-  static const double trim = 0.0; // tile.png 여백 있으면 0.08~0.12
 
   @override
   void paint(Canvas canvas, Size size) {
-    const n = 8;
+    const int n = 8;
 
-    final grid = Rect.fromLTRB(left, top, size.width - right, size.height - bottom);
-    final tile = (grid.width - gap * (n - 1)) / n;
-    final step = tile + gap;
+    final gridRect = Rect.fromLTRB(
+      _GamePageState.LEFT,
+      _GamePageState.TOP,
+      size.width - _GamePageState.RIGHT,
+      size.height - _GamePageState.BOTTOM,
+    );
 
-    // 빈칸 가이드 (맞추기 쉬움)
-    final emptyStroke = Paint()
-      ..color = Colors.white.withValues(alpha: 0.12)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-    for (int r = 0; r < n; r++) {
-      for (int c = 0; c < n; c++) {
-        final x = grid.left + c * step;
-        final y = grid.top + r * step;
-        canvas.drawRect(Rect.fromLTWH(x, y, tile, tile), emptyStroke);
+    final tile = (gridRect.width - _GamePageState.GAP * (n - 1)) / n;
+    final step = tile + _GamePageState.GAP;
+
+    onGridComputed(gridRect, tile, step);
+
+    if (showEmptyCells) {
+      final emptyFill = Paint()
+        ..color = const Color(0xFFFFFFFF).withValues(alpha: 0.04)
+        ..style = PaintingStyle.fill;
+
+      final emptyStroke = Paint()
+        ..color = const Color(0xFFFFFFFF).withValues(alpha: 0.22)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1;
+
+      for (int r = 0; r < n; r++) {
+        for (int c = 0; c < n; c++) {
+          final x = gridRect.left + c * step;
+          final y = gridRect.top + r * step;
+          final rect = Rect.fromLTWH(x, y, tile, tile);
+          canvas.drawRect(rect, emptyFill);
+          canvas.drawRect(rect, emptyStroke);
+        }
       }
     }
 
-    // 놓인 블록(색 반영)
     for (int r = 0; r < n; r++) {
       for (int c = 0; c < n; c++) {
         final id = board[r][c];
         if (id == 0) continue;
-        final color = kColors[(id - 1) % kColors.length];
-        final x = grid.left + c * step;
-        final y = grid.top + r * step;
-        _drawTile(canvas, Rect.fromLTWH(x, y, tile, tile), color);
+
+        final x = gridRect.left + c * step;
+        final y = gridRect.top + r * step;
+        final dst = Rect.fromLTWH(x, y, tile, tile);
+
+        final color = _idToColor(id);
+
+        if (tileImg != null) {
+          final src = Rect.fromLTWH(0, 0, tileImg!.width.toDouble(), tileImg!.height.toDouble());
+          final paint = Paint()
+            ..isAntiAlias = true
+            ..filterQuality = FilterQuality.high
+            ..colorFilter = ColorFilter.mode(color, BlendMode.modulate);
+          canvas.drawImageRect(tileImg!, src, dst, paint);
+        } else {
+          final p = Paint()..color = color.withValues(alpha: 0.85);
+          canvas.drawRect(dst, p);
+        }
       }
     }
   }
 
-  void _drawTile(Canvas canvas, Rect dst, Color tint) {
-    final img = tileImg;
-    if (img == null) {
-      canvas.drawRect(dst, Paint()..color = tint);
-      return;
-    }
-    final w = img.width.toDouble();
-    final h = img.height.toDouble();
-    final trimX = w * trim;
-    final trimY = h * trim;
-    final src = Rect.fromLTWH(trimX, trimY, w - trimX * 2, h - trimY * 2);
-
-    final paint = Paint()..colorFilter = ColorFilter.mode(tint, BlendMode.modulate);
-    canvas.drawImageRect(img, src, dst, paint);
+  Color _idToColor(int id) {
+    final colors = <Color>[
+      const Color(0xFFFF3B30),
+      const Color(0xFFAF52DE),
+      const Color(0xFF0A84FF),
+      const Color(0xFFFF2D55),
+      const Color(0xFF30D158),
+      const Color(0xFFFF9F0A),
+    ];
+    return colors[(id - 1) % colors.length];
   }
 
   @override
   bool shouldRepaint(covariant BoardPainter oldDelegate) => true;
 }
 
+// =========================
+// 트레이 painter
+// =========================
 class TrayPainter extends CustomPainter {
   final List<Piece> pieces;
   final ui.Image? tileImg;
-  TrayPainter({required this.pieces, required this.tileImg});
+  final int? hideIndex;
 
-  static const double trim = 0.0;
+  TrayPainter({
+    required this.pieces,
+    required this.tileImg,
+    required this.hideIndex,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     final slotW = size.width / 3;
+    final slotH = size.height;
 
     for (int i = 0; i < 3; i++) {
-      final slot = Rect.fromLTWH(i * slotW, 0, slotW, size.height);
+      if (hideIndex == i) continue; // ✅ 누른 슬롯은 비워두기
+
+      final slot = Rect.fromLTWH(i * slotW, 0, slotW, slotH);
       final piece = pieces[i];
 
-      final maxDim = max(piece.w, piece.h);
-      final pTile = min(slot.width, slot.height) / (maxDim + 1.4);
-      const g = 2.0;
+      final tile = min(slot.width, slot.height) * 0.25;
 
-      final pw = piece.w * pTile + (piece.w - 1) * g;
-      final ph = piece.h * pTile + (piece.h - 1) * g;
-      final origin = Offset(slot.center.dx - pw / 2, slot.center.dy - ph / 2);
+      final totalW = piece.w * tile + (piece.w - 1) * _GamePageState.GAP;
+      final totalH = piece.h * tile + (piece.h - 1) * _GamePageState.GAP;
+
+      final startX = slot.left + (slot.width - totalW) / 2;
+      final startY = slot.top + (slot.height - totalH) / 2;
 
       for (final cell in piece.cells) {
-        final x = origin.dx + cell.x * (pTile + g);
-        final y = origin.dy + cell.y * (pTile + g);
-        _drawTile(canvas, Rect.fromLTWH(x, y, pTile, pTile),
-            kColors[(piece.colorId - 1) % kColors.length]);
+        final x = startX + cell.c * (tile + _GamePageState.GAP);
+        final y = startY + cell.r * (tile + _GamePageState.GAP);
+        final dst = Rect.fromLTWH(x, y, tile, tile);
+
+        if (tileImg != null) {
+          final src = Rect.fromLTWH(0, 0, tileImg!.width.toDouble(), tileImg!.height.toDouble());
+          final paint = Paint()
+            ..isAntiAlias = true
+            ..filterQuality = FilterQuality.high
+            ..colorFilter = ColorFilter.mode(piece.color, BlendMode.modulate);
+          canvas.drawImageRect(tileImg!, src, dst, paint);
+        } else {
+          final p = Paint()..color = piece.color.withValues(alpha: 0.85);
+          canvas.drawRect(dst, p);
+        }
       }
     }
-  }
-
-  void _drawTile(Canvas canvas, Rect dst, Color tint) {
-    final img = tileImg;
-    if (img == null) {
-      canvas.drawRect(dst, Paint()..color = tint);
-      return;
-    }
-    final w = img.width.toDouble();
-    final h = img.height.toDouble();
-    final trimX = w * trim;
-    final trimY = h * trim;
-    final src = Rect.fromLTWH(trimX, trimY, w - trimX * 2, h - trimY * 2);
-
-    final paint = Paint()..colorFilter = ColorFilter.mode(tint, BlendMode.modulate);
-    canvas.drawImageRect(img, src, dst, paint);
   }
 
   @override
   bool shouldRepaint(covariant TrayPainter oldDelegate) => true;
 }
 
+// =========================
+// 드래그 프리뷰 painter
+// =========================
 class DragOverlayPainter extends CustomPainter {
-  final GlobalKey rootKey;
-  final Offset globalPos;
   final Piece piece;
+  final Offset globalPos;
   final ui.Image? tileImg;
-  final GlobalKey boardKey;
-  final Offset? grabOffsetInPiece;
-
-  final double left, top, right, bottom, gap;
-  final int n;
+  final double lift;
+  final double targetTile;
+  final double gap;
 
   DragOverlayPainter({
-    required this.rootKey,
-    required this.globalPos,
     required this.piece,
+    required this.globalPos,
     required this.tileImg,
-    required this.boardKey,
-    required this.grabOffsetInPiece,
-    required this.left,
-    required this.top,
-    required this.right,
-    required this.bottom,
+    required this.lift,
+    required this.targetTile,
     required this.gap,
-    required this.n,
   });
-
-  static const double trim = 0.0;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final rootBox = rootKey.currentContext?.findRenderObject() as RenderBox?;
-    if (rootBox == null) return;
+    // ✅ 터치한 곳보다 위로(손가락 안 가리게)
+    final pos = globalPos + Offset(0, -lift);
 
-    // ✅ global -> 화면 로컬
-    final screenPos = rootBox.globalToLocal(globalPos);
+    final totalW = piece.w * targetTile + (piece.w - 1) * gap;
+    final totalH = piece.h * targetTile + (piece.h - 1) * gap;
 
-    // 보드의 tile 크기에 맞춰 프리뷰도 동일 크기로
-    final boardBox = boardKey.currentContext?.findRenderObject() as RenderBox?;
-    if (boardBox == null) return;
-
-    final boardSize = boardBox.size;
-    final grid = Rect.fromLTRB(left, top, boardSize.width - right, boardSize.height - bottom);
-    final tile = (grid.width - gap * (n - 1)) / n;
-
-    final pw = piece.w * tile + (piece.w - 1) * gap;
-    final ph = piece.h * tile + (piece.h - 1) * gap;
-
-    final grab = grabOffsetInPiece ?? Offset(pw / 2, ph / 2);
-    final origin = screenPos - grab;
-
-    final tint = kColors[(piece.colorId - 1) % kColors.length].withValues(alpha: 0.90);
+    final startX = pos.dx - totalW / 2;
+    final startY = pos.dy - totalH / 2;
 
     for (final cell in piece.cells) {
-      final x = origin.dx + cell.x * (tile + gap);
-      final y = origin.dy + cell.y * (tile + gap);
-      _drawTile(canvas, Rect.fromLTWH(x, y, tile, tile), tint);
-    }
-  }
+      final x = startX + cell.c * (targetTile + gap);
+      final y = startY + cell.r * (targetTile + gap);
+      final dst = Rect.fromLTWH(x, y, targetTile, targetTile);
 
-  void _drawTile(Canvas canvas, Rect dst, Color tint) {
-    final img = tileImg;
-    if (img == null) {
-      canvas.drawRect(dst, Paint()..color = tint);
-      return;
+      if (tileImg != null) {
+        final src = Rect.fromLTWH(0, 0, tileImg!.width.toDouble(), tileImg!.height.toDouble());
+        final paint = Paint()
+          ..isAntiAlias = true
+          ..filterQuality = FilterQuality.high
+          ..colorFilter = ColorFilter.mode(piece.color, BlendMode.modulate);
+        canvas.drawImageRect(tileImg!, src, dst, paint);
+      } else {
+        final p = Paint()..color = piece.color.withValues(alpha: 0.85);
+        canvas.drawRect(dst, p);
+      }
     }
-    final w = img.width.toDouble();
-    final h = img.height.toDouble();
-    final trimX = w * trim;
-    final trimY = h * trim;
-    final src = Rect.fromLTWH(trimX, trimY, w - trimX * 2, h - trimY * 2);
-
-    final paint = Paint()..colorFilter = ColorFilter.mode(tint, BlendMode.modulate);
-    canvas.drawImageRect(img, src, dst, paint);
   }
 
   @override
