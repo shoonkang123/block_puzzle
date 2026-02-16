@@ -36,9 +36,9 @@ class _GamePageState extends State<GamePage> {
     final dx = p.dx - rect.left;
     final dy = p.dy - rect.top;
 
-    const gap = BoardPainter.GAP;
-    final tile = (rect.width - gap * (n - 1)) / n;
-    final step = tile + gap;
+    const gapPx = BoardPainter.gapPx;
+    final tile = (rect.width - gapPx * (n - 1)) / n;
+    final step = tile + gapPx;
 
     final col = (dx / step).floor();
     final row = (dy / step).floor();
@@ -109,47 +109,47 @@ class BoardPainter extends CustomPainter {
   // ===========================
   // ✅ 여기 숫자만 조절하면 됨
   // ===========================
-  static const double LEFT = 14;
-  static const double TOP = 14;
-  static const double RIGHT = 14;
-  static const double BOTTOM = 14;
+  static const double leftPx = 14;
+  static const double topPx = 14;
+  static const double rightPx = 14;
+  static const double bottomPx = 14;
 
   // 칸 사이 틈(gap)
-  static const double GAP = 2;
+  static const double gapPx = 2;
 
-  // ✅ 디버그용: 빈 칸 테두리/채움 표시 ON/OFF
-  static const bool SHOW_EMPTY_CELLS = true;
+  // 빈 칸도 보이게
+  static const bool showEmptyCells = true;
 
   @override
   void paint(Canvas canvas, Size size) {
     const int n = 8;
 
     final gridRect = Rect.fromLTRB(
-      LEFT,
-      TOP,
-      size.width - RIGHT,
-      size.height - BOTTOM,
+      leftPx,
+      topPx,
+      size.width - rightPx,
+      size.height - bottomPx,
     );
     onGridRect(gridRect);
 
-    final tile = (gridRect.width - GAP * (n - 1)) / n;
-    final step = tile + GAP;
+    final tile = (gridRect.width - gapPx * (n - 1)) / n;
+    final step = tile + gapPx;
 
     // (1) gridRect 자체 박스
     final debugRectPaint = Paint()
-      ..color = Colors.green.withOpacity(0.35)
+      ..color = Colors.green.withValues(alpha: 0.35)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2;
     canvas.drawRect(gridRect, debugRectPaint);
 
-    // (2) ✅ 빈 칸들도 눈에 보이게: 각 칸 outline + 살짝 채움(반투명)
-    if (SHOW_EMPTY_CELLS) {
+    // (2) 빈 칸 표시
+    if (showEmptyCells) {
       final emptyFill = Paint()
-        ..color = Colors.white.withOpacity(0.04)
+        ..color = Colors.white.withValues(alpha: 0.04)
         ..style = PaintingStyle.fill;
 
       final emptyStroke = Paint()
-        ..color = Colors.white.withOpacity(0.35)
+        ..color = Colors.white.withValues(alpha: 0.35)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1;
 
@@ -159,7 +159,6 @@ class BoardPainter extends CustomPainter {
           final y = gridRect.top + r * step;
           final cellRect = Rect.fromLTWH(x, y, tile, tile);
 
-          // 빈 칸도 보이게
           canvas.drawRect(cellRect, emptyFill);
           canvas.drawRect(cellRect, emptyStroke);
         }
@@ -167,7 +166,7 @@ class BoardPainter extends CustomPainter {
     }
 
     // (3) 채워진 칸(빨강)
-    final fillPaint = Paint()..color = Colors.red.withOpacity(0.75);
+    final fillPaint = Paint()..color = Colors.red.withValues(alpha: 0.75);
 
     for (int r = 0; r < n; r++) {
       for (int c = 0; c < n; c++) {
