@@ -25,8 +25,9 @@ class Cell {
 }
 
 class Piece {
-  final List<Cell> cells;
+  final List<Cell> cells; // (0,0) 기준 상대 좌표
   final Color color;
+
   const Piece({required this.cells, required this.color});
 
   int get w => cells.map((e) => e.c).reduce(max) + 1;
@@ -42,35 +43,46 @@ class GamePage extends StatefulWidget {
 class _GamePageState extends State<GamePage> {
   static const int n = 8;
 
-  final List<List<int>> board = List.generate(n, (_) => List.filled(n, 0));
-
-  late List<Piece> pieces;
-  ui.Image? tileImg;
-
-  Rect? _gridRect;
-  double _gridTile = 0;
-  double _gridStep = 0;
-
-  // 트레이 슬롯(화면 local 좌표 기준)
-  final List<Rect> _traySlotRects = [Rect.zero, Rect.zero, Rect.zero];
-
-  // 드래그 상태
-  int? draggingIndex;
-  Piece? draggingPiece;
-  Offset? dragGlobalPos;
-
-  // ✅ 손가락 가림 방지(더 위로)
-  static const double fingerLift = 110;
-
-  // ✅ 너가 확정한 보드 맞춤값
+  // =========================
+  // 보드 맞춤값(확정)
+  // =========================
   static const double LEFT = 14;
   static const double TOP = 14;
   static const double RIGHT = 14;
   static const double BOTTOM = 14;
   static const double GAP = 2;
 
-  // (옵션) 빈 칸 보이게
+  // =========================
+  // 손가락 가림 방지(프리뷰 위로)
+  // =========================
+  static const double fingerLift = 110;
+
+  // 빈 칸 가이드
   static const bool SHOW_EMPTY_CELLS = true;
+
+  // 보드 상태(0=empty, 1..=색 id)
+  final List<List<int>> board = List.generate(n, (_) => List.filled(n, 0));
+
+  // 트레이 3개
+  late List<Piece> pieces;
+
+  // 타일 이미지
+  ui.Image? tileImg;
+
+  // 보드에서 실제 8x8 영역(화면 좌표로 보정된 rect)
+  Rect? _gridRect;
+  double _gridTile = 0; // 칸 크기(틈 제외)
+  double _gridStep = 0; // tile + gap
+
+  // 트레이 슬롯 영역(화면 local 좌표 기준)
+  final List<Rect> _traySlotRects = [Rect.zero, Rect.zero, Rect.zero];
+
+  // 드래그 상태
+  int? draggingIndex;
+  Piece? draggingPiece;
+
+  // 드래그 중 손가락 좌표(화면 global)
+  Offset? dragGlobalPos;
 
   final _rng = Random();
 
@@ -119,21 +131,17 @@ class _GamePageState extends State<GamePage> {
   }
 
   // =========================
-  // 드래그 시작/이동/종료
+  // 드래그
   // =========================
   void _onPanStart(DragStartDetails d) {
-    // ✅ 트레이 슬롯에서 시작했는지
     final local = d.localPosition;
+
     for (int i = 0; i < 3; i++) {
       if (_traySlotRects[i].contains(local)) {
         setState(() {
           draggingIndex = i;
           draggingPiece = pieces[i];
-
-          // ✅ 시작 순간부터 손가락 위로 뜨게 보이도록 globalPos 저장
-          dragGlobalPos = d.globalPosition;
-          // ✅ 트레이 슬롯은 즉시 비우기(숨김)
-          // -> painter에서 hideIndex로 처리됨
+          dragGlobalPos = d.globalPosition; // 시작 순간부터 프리뷰 표시
         });
         return;
       }
@@ -148,68 +156,72 @@ class _GamePageState extends State<GamePage> {
   void _onPanEnd(DragEndDetails d) {
     if (draggingPiece == null || draggingIndex == null) return;
 
-    final placed = _tryPlaceOnBoard(draggingPiece!, dragGlobalPos);
+    // ✅ 프리뷰가 그려지는 위치(손가락-리프트)를 그대로 드롭 판정에도 사용
+    final previewGlobalCenter = d.globalPosition + const Offset(0, -fingerLift);
+
+    final placed = _tryPlaceOnBoardMatchPreview(draggingPiece!, previewGlobalCenter);
 
     setState(() {
       if (placed) {
-        // ✅ 성공한 경우에만 새 블록 생성
         pieces[draggingIndex!] = _randomPiece();
       }
-      // 실패면 원래 블록이 그대로 다시 보임(숨김 해제)
       draggingIndex = null;
       draggingPiece = null;
       dragGlobalPos = null;
     });
   }
 
-  bool _tryPlaceOnBoard(Piece piece, Offset? globalPos) {
+  // ✅✅✅ 핵심: "프리뷰와 동일한 방식"으로 startX/startY부터 계산해서 스냅
+  bool _tryPlaceOnBoardMatchPreview(Piece piece, Offset previewGlobalCenter) {
     final rect = _gridRect;
-    if (rect == null || globalPos == null) return false;
+    if (rect == null) return false;
 
     final box = context.findRenderObject() as RenderBox?;
     if (box == null) return false;
 
-    // ✅ global -> local
-    final p = box.globalToLocal(globalPos);
-
-    if (!rect.contains(p)) return false;
-
-    final dx = p.dx - rect.left;
-    final dy = p.dy - rect.top;
+    // 프리뷰 중심(global) -> 화면 local
+    final centerLocal = box.globalToLocal(previewGlobalCenter);
 
     final tile = _gridTile;
     final step = _gridStep;
     if (tile <= 0 || step <= 0) return false;
 
-    final col = (dx / step).floor();
-    final row = (dy / step).floor();
+    // ===== 1) 프리뷰가 그려지는 "좌상단(startX/startY)"을 똑같이 계산 =====
+    // DragOverlayPainter와 동일:
+    final totalW = piece.w * tile + (piece.w - 1) * GAP;
+    final totalH = piece.h * tile + (piece.h - 1) * GAP;
 
-    if (row < 0 || row >= n || col < 0 || col >= n) return false;
+    final startX = centerLocal.dx - totalW / 2;
+    final startY = centerLocal.dy - totalH / 2;
 
-    // ✅ 틈 클릭/드롭 방지: 칸 내부일 때만
-    final inTileX = (dx - col * step) <= tile;
-    final inTileY = (dy - row * step) <= tile;
-    if (!inTileX || !inTileY) return false;
+    // ===== 2) 그 좌상단이 보드 격자에서 어느 칸에 가장 가까운지 스냅(round) =====
+    final gx = startX - rect.left;
+    final gy = startY - rect.top;
 
-    // 범위/충돌 체크
+    final baseCol = (gx / step).round();
+    final baseRow = (gy / step).round();
+
+    // 범위
+    if (baseRow < 0 || baseCol < 0) return false;
+    if (baseRow + piece.h > n || baseCol + piece.w > n) return false;
+
+    // 충돌
     for (final cell in piece.cells) {
-      final rr = row + cell.r;
-      final cc = col + cell.c;
-      if (rr < 0 || rr >= n || cc < 0 || cc >= n) return false;
+      final rr = baseRow + cell.r;
+      final cc = baseCol + cell.c;
       if (board[rr][cc] != 0) return false;
     }
 
     // 배치(색 유지)
     final colorId = _colorToId(piece.color);
     for (final cell in piece.cells) {
-      board[row + cell.r][col + cell.c] = colorId;
+      board[baseRow + cell.r][baseCol + cell.c] = colorId;
     }
 
     return true;
   }
 
   int _colorToId(Color c) {
-    // 간단히 색 value 기반으로 1..N 반복 매핑
     final colors = <Color>[
       const Color(0xFFFF3B30),
       const Color(0xFFAF52DE),
@@ -232,13 +244,11 @@ class _GamePageState extends State<GamePage> {
         final w = cons.maxWidth;
         final h = cons.maxHeight;
 
-        // 보드 정사각형 크기
+        // 보드 크기/위치
         final boardSide = min(w * 0.96, h * 0.60);
-
-        // ✅ 너가 좋아한 위치
         final boardTop = h * 0.20;
 
-        // 트레이 높이(하단바 바로 위)
+        // 트레이
         final trayHeight = min(160.0, h * 0.19);
 
         return GestureDetector(
@@ -267,7 +277,6 @@ class _GamePageState extends State<GamePage> {
                         tileImg: tileImg,
                         showEmptyCells: SHOW_EMPTY_CELLS,
                         onGridComputed: (gridRect, tile, step) {
-                          // gridRect는 보드 위젯 내부 좌표
                           final boardOffset = Offset((w - boardSide) / 2, boardTop);
                           _gridRect = gridRect.shift(boardOffset);
                           _gridTile = tile;
@@ -297,12 +306,11 @@ class _GamePageState extends State<GamePage> {
                             painter: TrayPainter(
                               pieces: pieces,
                               tileImg: tileImg,
-                              hideIndex: draggingIndex, // ✅ 누르면 자리 비움
+                              hideIndex: draggingIndex,
                             ),
                           ),
                           LayoutBuilder(
                             builder: (context, trayCons) {
-                              // ✅ 트레이 슬롯 rect를 화면 local 좌표 기준으로 계산
                               WidgetsBinding.instance.addPostFrameCallback((_) {
                                 final box = context.findRenderObject() as RenderBox?;
                                 final parent = this.context.findRenderObject() as RenderBox?;
@@ -334,14 +342,14 @@ class _GamePageState extends State<GamePage> {
                 ),
               ),
 
-              // ===== 드래그 프리뷰(오버레이) =====
+              // ===== 드래그 프리뷰 =====
               if (draggingPiece != null && dragGlobalPos != null)
                 CustomPaint(
                   painter: DragOverlayPainter(
                     piece: draggingPiece!,
                     globalPos: dragGlobalPos!,
                     tileImg: tileImg,
-                    lift: fingerLift, // ✅ 더 위로 뜸
+                    lift: fingerLift,
                     targetTile: _gridTile > 0 ? _gridTile : 42,
                     gap: GAP,
                   ),
@@ -356,7 +364,7 @@ class _GamePageState extends State<GamePage> {
 }
 
 // =========================
-// 보드 painter
+// Board Painter
 // =========================
 class BoardPainter extends CustomPainter {
   final List<List<int>> board;
@@ -451,7 +459,7 @@ class BoardPainter extends CustomPainter {
 }
 
 // =========================
-// 트레이 painter
+// Tray Painter
 // =========================
 class TrayPainter extends CustomPainter {
   final List<Piece> pieces;
@@ -470,7 +478,7 @@ class TrayPainter extends CustomPainter {
     final slotH = size.height;
 
     for (int i = 0; i < 3; i++) {
-      if (hideIndex == i) continue; // ✅ 누른 슬롯은 비워두기
+      if (hideIndex == i) continue;
 
       final slot = Rect.fromLTWH(i * slotW, 0, slotW, slotH);
       final piece = pieces[i];
@@ -508,7 +516,7 @@ class TrayPainter extends CustomPainter {
 }
 
 // =========================
-// 드래그 프리뷰 painter
+// Drag Overlay Painter
 // =========================
 class DragOverlayPainter extends CustomPainter {
   final Piece piece;
@@ -529,14 +537,14 @@ class DragOverlayPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // ✅ 터치한 곳보다 위로(손가락 안 가리게)
-    final pos = globalPos + Offset(0, -lift);
+    // 프리뷰 중심
+    final center = globalPos + Offset(0, -lift);
 
     final totalW = piece.w * targetTile + (piece.w - 1) * gap;
     final totalH = piece.h * targetTile + (piece.h - 1) * gap;
 
-    final startX = pos.dx - totalW / 2;
-    final startY = pos.dy - totalH / 2;
+    final startX = center.dx - totalW / 2;
+    final startY = center.dy - totalH / 2;
 
     for (final cell in piece.cells) {
       final x = startX + cell.c * (targetTile + gap);
