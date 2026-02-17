@@ -25,7 +25,7 @@ class Cell {
 }
 
 class Piece {
-  final List<Cell> cells; // (0,0) 기준 상대 좌표
+  final List<Cell> cells;
   final Color color;
 
   const Piece({required this.cells, required this.color});
@@ -43,45 +43,32 @@ class GamePage extends StatefulWidget {
 class _GamePageState extends State<GamePage> {
   static const int n = 8;
 
-  // =========================
-  // 보드 맞춤값(확정)
-  // =========================
+  // 보드 맞춤값
   static const double LEFT = 14;
   static const double TOP = 14;
   static const double RIGHT = 14;
   static const double BOTTOM = 14;
   static const double GAP = 2;
 
-  // =========================
   // 손가락 가림 방지(프리뷰 위로)
-  // =========================
   static const double fingerLift = 110;
 
   // 빈 칸 가이드
   static const bool SHOW_EMPTY_CELLS = true;
 
-  // 보드 상태(0=empty, 1..=색 id)
   final List<List<int>> board = List.generate(n, (_) => List.filled(n, 0));
-
-  // 트레이 3개
   late List<Piece> pieces;
 
-  // 타일 이미지
   ui.Image? tileImg;
 
-  // 보드에서 실제 8x8 영역(화면 좌표로 보정된 rect)
   Rect? _gridRect;
-  double _gridTile = 0; // 칸 크기(틈 제외)
-  double _gridStep = 0; // tile + gap
+  double _gridTile = 0;
+  double _gridStep = 0;
 
-  // 트레이 슬롯 영역(화면 local 좌표 기준)
   final List<Rect> _traySlotRects = [Rect.zero, Rect.zero, Rect.zero];
 
-  // 드래그 상태
   int? draggingIndex;
   Piece? draggingPiece;
-
-  // 드래그 중 손가락 좌표(화면 global)
   Offset? dragGlobalPos;
 
   final _rng = Random();
@@ -135,13 +122,12 @@ class _GamePageState extends State<GamePage> {
   // =========================
   void _onPanStart(DragStartDetails d) {
     final local = d.localPosition;
-
     for (int i = 0; i < 3; i++) {
       if (_traySlotRects[i].contains(local)) {
         setState(() {
           draggingIndex = i;
           draggingPiece = pieces[i];
-          dragGlobalPos = d.globalPosition; // 시작 순간부터 프리뷰 표시
+          dragGlobalPos = d.globalPosition;
         });
         return;
       }
@@ -156,22 +142,54 @@ class _GamePageState extends State<GamePage> {
   void _onPanEnd(DragEndDetails d) {
     if (draggingPiece == null || draggingIndex == null) return;
 
-    // ✅ 프리뷰가 그려지는 위치(손가락-리프트)를 그대로 드롭 판정에도 사용
     final previewGlobalCenter = d.globalPosition + const Offset(0, -fingerLift);
-
     final placed = _tryPlaceOnBoardMatchPreview(draggingPiece!, previewGlobalCenter);
 
     setState(() {
-      if (placed) {
-        pieces[draggingIndex!] = _randomPiece();
-      }
+      if (placed) pieces[draggingIndex!] = _randomPiece();
       draggingIndex = null;
       draggingPiece = null;
       dragGlobalPos = null;
     });
   }
 
-  // ✅✅✅ 핵심: "프리뷰와 동일한 방식"으로 startX/startY부터 계산해서 스냅
+  // ===== (A) 프리뷰(센터) -> 프리뷰 좌상단 계산 =====
+  Offset _previewTopLeftFromCenterLocal(Piece piece, Offset centerLocal, double tile) {
+    final totalW = piece.w * tile + (piece.w - 1) * GAP;
+    final totalH = piece.h * tile + (piece.h - 1) * GAP;
+    return Offset(centerLocal.dx - totalW / 2, centerLocal.dy - totalH / 2);
+  }
+
+  // ===== (B) 프리뷰 좌상단 -> 보드 스냅 baseRow/baseCol =====
+  ({int row, int col})? _snapBaseFromPreviewTopLeft(Offset previewTopLeftLocal) {
+    final rect = _gridRect;
+    if (rect == null) return null;
+
+    final step = _gridStep;
+    if (step <= 0) return null;
+
+    final gx = previewTopLeftLocal.dx - rect.left;
+    final gy = previewTopLeftLocal.dy - rect.top;
+
+    final baseCol = (gx / step).round();
+    final baseRow = (gy / step).round();
+    return (row: baseRow, col: baseCol);
+  }
+
+  // ===== (C) 놓을 수 있는지 체크 =====
+  bool _canPlace(Piece piece, int baseRow, int baseCol) {
+    if (baseRow < 0 || baseCol < 0) return false;
+    if (baseRow + piece.h > n || baseCol + piece.w > n) return false;
+
+    for (final cell in piece.cells) {
+      final rr = baseRow + cell.r;
+      final cc = baseCol + cell.c;
+      if (board[rr][cc] != 0) return false;
+    }
+    return true;
+  }
+
+  // ===== (D) 실제 배치 =====
   bool _tryPlaceOnBoardMatchPreview(Piece piece, Offset previewGlobalCenter) {
     final rect = _gridRect;
     if (rect == null) return false;
@@ -179,45 +197,21 @@ class _GamePageState extends State<GamePage> {
     final box = context.findRenderObject() as RenderBox?;
     if (box == null) return false;
 
-    // 프리뷰 중심(global) -> 화면 local
-    final centerLocal = box.globalToLocal(previewGlobalCenter);
-
     final tile = _gridTile;
     final step = _gridStep;
     if (tile <= 0 || step <= 0) return false;
 
-    // ===== 1) 프리뷰가 그려지는 "좌상단(startX/startY)"을 똑같이 계산 =====
-    // DragOverlayPainter와 동일:
-    final totalW = piece.w * tile + (piece.w - 1) * GAP;
-    final totalH = piece.h * tile + (piece.h - 1) * GAP;
+    final centerLocal = box.globalToLocal(previewGlobalCenter);
+    final topLeft = _previewTopLeftFromCenterLocal(piece, centerLocal, tile);
+    final snap = _snapBaseFromPreviewTopLeft(topLeft);
+    if (snap == null) return false;
 
-    final startX = centerLocal.dx - totalW / 2;
-    final startY = centerLocal.dy - totalH / 2;
+    if (!_canPlace(piece, snap.row, snap.col)) return false;
 
-    // ===== 2) 그 좌상단이 보드 격자에서 어느 칸에 가장 가까운지 스냅(round) =====
-    final gx = startX - rect.left;
-    final gy = startY - rect.top;
-
-    final baseCol = (gx / step).round();
-    final baseRow = (gy / step).round();
-
-    // 범위
-    if (baseRow < 0 || baseCol < 0) return false;
-    if (baseRow + piece.h > n || baseCol + piece.w > n) return false;
-
-    // 충돌
-    for (final cell in piece.cells) {
-      final rr = baseRow + cell.r;
-      final cc = baseCol + cell.c;
-      if (board[rr][cc] != 0) return false;
-    }
-
-    // 배치(색 유지)
     final colorId = _colorToId(piece.color);
     for (final cell in piece.cells) {
-      board[baseRow + cell.r][baseCol + cell.c] = colorId;
+      board[snap.row + cell.r][snap.col + cell.c] = colorId;
     }
-
     return true;
   }
 
@@ -244,11 +238,9 @@ class _GamePageState extends State<GamePage> {
         final w = cons.maxWidth;
         final h = cons.maxHeight;
 
-        // 보드 크기/위치
         final boardSide = min(w * 0.96, h * 0.60);
         final boardTop = h * 0.20;
 
-        // 트레이
         final trayHeight = min(160.0, h * 0.19);
 
         return GestureDetector(
@@ -342,7 +334,24 @@ class _GamePageState extends State<GamePage> {
                 ),
               ),
 
-              // ===== 드래그 프리뷰 =====
+              // ===== ✅ 보드 위 "스냅 프리뷰" (놓을 수 있을 때만) =====
+              if (draggingPiece != null && dragGlobalPos != null && _gridRect != null && _gridTile > 0 && _gridStep > 0)
+                CustomPaint(
+                  painter: SnapPreviewPainter(
+                    piece: draggingPiece!,
+                    dragGlobalPos: dragGlobalPos!,
+                    fingerLift: fingerLift,
+                    gridRect: _gridRect!,
+                    tile: _gridTile,
+                    step: _gridStep,
+                    gap: GAP,
+                    canPlace: (row, col) => _canPlace(draggingPiece!, row, col),
+                    tileImg: tileImg,
+                  ),
+                  child: const SizedBox.expand(),
+                ),
+
+              // ===== 드래그 프리뷰(손가락 따라다니는 것) =====
               if (draggingPiece != null && dragGlobalPos != null)
                 CustomPaint(
                   painter: DragOverlayPainter(
@@ -361,6 +370,84 @@ class _GamePageState extends State<GamePage> {
       }),
     );
   }
+}
+
+// =========================
+// 스냅 프리뷰 Painter
+// =========================
+class SnapPreviewPainter extends CustomPainter {
+  final Piece piece;
+  final Offset dragGlobalPos;
+  final double fingerLift;
+
+  final Rect gridRect;
+  final double tile;
+  final double step;
+  final double gap;
+
+  final bool Function(int row, int col) canPlace;
+  final ui.Image? tileImg;
+
+  SnapPreviewPainter({
+    required this.piece,
+    required this.dragGlobalPos,
+    required this.fingerLift,
+    required this.gridRect,
+    required this.tile,
+    required this.step,
+    required this.gap,
+    required this.canPlace,
+    required this.tileImg,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // globalPos는 이미 GestureDetector 기준 global 좌표로 들어옴
+    // 여기서는 CustomPainter가 화면 전체라서 globalPos를 그대로 local처럼 써도 됨(오차가 있을 수 있음).
+    // 안전하게 하려면 RenderBox 변환을 해야 하지만, 현재 구조 유지 요청이라 여기선 동일 스케일로 처리.
+    final center = dragGlobalPos + Offset(0, -fingerLift);
+
+    final totalW = piece.w * tile + (piece.w - 1) * gap;
+    final totalH = piece.h * tile + (piece.h - 1) * gap;
+
+    final startX = center.dx - totalW / 2;
+    final startY = center.dy - totalH / 2;
+
+    final gx = startX - gridRect.left;
+    final gy = startY - gridRect.top;
+
+    final baseCol = (gx / step).round();
+    final baseRow = (gy / step).round();
+
+    if (!canPlace(baseRow, baseCol)) return;
+
+    // ✅ 스냅된 위치의 top-left를 다시 계산해서 유령 프리뷰 그림
+    final snapX = gridRect.left + baseCol * step;
+    final snapY = gridRect.top + baseRow * step;
+
+    final ghostAlpha = 0.35;
+
+    for (final cell in piece.cells) {
+      final x = snapX + cell.c * step;
+      final y = snapY + cell.r * step;
+      final dst = Rect.fromLTWH(x, y, tile, tile);
+
+      if (tileImg != null) {
+        final src = Rect.fromLTWH(0, 0, tileImg!.width.toDouble(), tileImg!.height.toDouble());
+        final paint = Paint()
+          ..isAntiAlias = true
+          ..filterQuality = FilterQuality.high
+          ..colorFilter = ColorFilter.mode(piece.color.withValues(alpha: ghostAlpha), BlendMode.modulate);
+        canvas.drawImageRect(tileImg!, src, dst, paint);
+      } else {
+        final p = Paint()..color = piece.color.withValues(alpha: ghostAlpha);
+        canvas.drawRect(dst, p);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant SnapPreviewPainter oldDelegate) => true;
 }
 
 // =========================
@@ -537,7 +624,6 @@ class DragOverlayPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 프리뷰 중심
     final center = globalPos + Offset(0, -lift);
 
     final totalW = piece.w * targetTile + (piece.w - 1) * gap;
